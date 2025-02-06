@@ -1,0 +1,189 @@
+
+Deploying an Application in AWS EKS with Fargate & ALB (Using RDS)
+This guide provides **end-to-end steps** to deploy an application in **AWS EKS using Fargate with an ALB** while connecting to an **RDS database**.  
+---
+##  Prerequisites ##
+Before proceeding, ensure you have:  
+
+1. AWS Account & Permissions
+- AWS account with **Admin** or **IAM user** permissions.  
+- Access to **EKS**, **IAM**, **VPC**, **RDS**, **Fargate**, and **ALB services**.  
+
+2. Installed CLI Tools (Windows & Linux)
+Ensure the following tools are installed and configured:  
+Windows Users: Install Tools via Chocolatey
+```
+choco install awscli eksctl kubectl helm -y
+```
+
+Linux Users: Install Required Tools
+```
+sudo apt update && sudo apt install -y awscli curl unzip jq
+curl -LO "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_Linux_amd64.tar.gz"
+tar -xzf eksctl_Linux_amd64.tar.gz
+sudo mv eksctl /usr/local/bin/
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+chmod +x kubectl
+sudo mv kubectl /usr/local/bin/
+```
+
+3. Configure AWS CLI 
+Authenticate and configure AWS CLI with your **IAM credentials**:  
+```
+aws configure
+```
+Required Inputs: 
+- AWS Access Key ID
+- AWS Secret Access Key 
+- Default region: `us-east-1`  
+- Output format: `json` (default)  
+
+4. Install & Configure Helm
+Helm is required to install the AWS Load Balancer Controller.  
+ Windows
+choco install kubernetes-helm -y
+
+ Linux & MacOS  
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+```
+5. Create an RDS Database  
+If your application requires **AWS RDS**, create a PostgreSQL or MySQL database:  
+```
+aws rds create-db-instance \
+  --db-instance-identifier mydb-instance \
+  --db-instance-class db.t3.micro \
+  --engine mysql \
+  --allocated-storage 20 \
+  --master-username admin \
+  --master-user-password MyPassword123 \
+  --backup-retention-period 7 \
+  --availability-zone us-east-1a
+```
+Once RDS is available, retrieve its endpoint:  
+```
+aws rds describe-db-instances --query "DBInstances[*].Endpoint.Address"
+```
+Use this **RDS endpoint** in your **application’s database connection settings**.
+
+---
+Step-by-Step EKS Deployment Process
+Step 1: Create an EKS Cluster
+Run the following command to create an EKS cluster with Fargate:  
+```
+eksctl create cluster --name demo-cluster --region us-east-1 --fargate
+```
+Estimated Time: 15-20 minutes 
+Once the cluster is ready, verify if it appears in **AWS EKS Console** or use:  
+```
+aws eks update-kubeconfig --name demo-cluster --region us-east-1
+```
+Expected Output: 
+```
+Added new context arn:aws:eks:us-east-1:<account ID>:cluster/demo-cluster to C:\Users\Raghvendra Singh\.kube\config
+Step 2: Create a Fargate Profile**
+Define a **Fargate profile** to run pods without managing EC2 instances.
+
+  For Linux 
+```
+eksctl create fargateprofile \
+  --cluster demo-cluster \
+  --region us-east-1 \
+  --name alb-sample-app \
+  --namespace myapp
+```
+For Windows 
+```
+eksctl create fargateprofile --cluster demo-cluster --region us-east-1 --name alb-sample-app --namespace myapp
+
+Step 3: Deploy the Sample Application**
+Deploy a test application using `kubectl`:  
+```
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.5.4/docs/examples/2048/2048_full.yaml
+```
+Verify Deployment
+```
+kubectl get pods -n myapp
+kubectl get svc -n myapp
+```
+Step 4: Configure IAM & ALB Controller**
+4.1 Associate OIDC Provider**  
+```
+eksctl utils associate-iam-oidc-provider --cluster demo-cluster --approve
+```
+4.2 Download IAM Policy for ALB Controller**  
+```
+curl -O https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.11.0/docs/install/iam_policy.json
+```
+4.3 Create IAM Policy**  
+```
+aws iam create-policy \
+    --policy-name AWSLoadBalancerControllerIAMPolicy \
+    --policy-document file://iam_policy.json
+```
+4.4 Create IAM Role for ALB Controller**  
+```
+eksctl create iamserviceaccount \
+  --cluster=demo-cluster \
+  --namespace=kube-system \
+  --name=aws-load-balancer-controller \
+  --role-name AmazonEKSLoadBalancerControllerRole \
+  --attach-policy-arn=arn:aws:iam::<your-aws-account-id>:policy/AWSLoadBalancerControllerIAMPolicy \
+  --approve
+```
+Step 5: Deploy ALB Controller**
+     5.1 Add the Helm Repository**
+```
+helm repo add eks https://aws.github.io/eks-charts
+```
+    5.2 Update the Helm Repository**
+```
+helm repo update eks
+```
+5.3 Install ALB Controller**
+```
+helm install aws-load-balancer-controller eks/aws-load-balancer-controller \            
+  -n kube-system \
+  --set clusterName=demo-cluster \
+  --set serviceAccount.create=false \
+  --set serviceAccount.name=aws-load-balancer-controller \
+  --set region=us-east-1 \
+  --set vpcId=<your-vpc-id>
+```
+5.4 Verify ALB Deployment**
+```
+kubectl get deployment -n kube-system aws-load-balancer-controller
+kubectl get ingress -n myapp
+```
+==============(Optional LAB)=====================================
+Step 6: Modify Deployment - For example- Change Replica Count 
+If you need to **update the replica count** from 5 to 3:  
+
+6.1 Download the YAML File**
+```
+curl -o 2048_full.yaml https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.5.4/docs/examples/2048/2048_full.yaml
+```
+
+6.2 Modify the YAML File**
+Open `2048_full.yaml` in a **text editor** and update:  
+```
+spec:
+  replicas: 3  # Change from 5 to 3
+```
+
+6.3 Apply the Updated YAML**
+```
+kubectl apply -f 2048_full.yaml
+```
+
+6.4 Verify Deployment**
+``
+kubectl get deployments -n myapp
+kubectl get pods -n myapp
+kubectl get ingress -n myapp
+```
+Summary
+1 Set up prerequisites (CLI tools, IAM, RDS, and Helm). 
+2 Created an EKS Cluster with Fargate.  
+3 Configured IAM, OIDC, and ALB Controller.
+4 Deployed and validated the sample application. 
+5 Modified deployment to update replica count.
